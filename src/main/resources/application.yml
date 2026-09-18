@@ -1,0 +1,48 @@
+server:
+  port: 8090
+
+spring:
+  application:
+    name: mcp‑tool‑server
+  config:
+    import: optional:nacos
+  ai:
+    mcp:
+      server:
+        enabled: true
+        name: mcp-tool-server
+        version: 1.0.0
+        protocol: STREAMABLE
+        streamable-http:
+          mcp-endpoint: /mcp   # 唯一对外端点，POST/GET都走这个路径
+          keep-alive-interval: 30s
+        capabilities:
+          tool: true
+          resource: true
+          prompt: true
+          completion: true
+
+  cloud:
+    nacos:
+      discovery:
+        server-addr: 127.0.0.1:8848
+        username: nacos
+        password: nacos
+        namespace: public
+        # 【核心修复】关闭自动注册！！解决STARTING报错
+        register-enabled: false
+      config:
+        server-addr: 127.0.0.1:8848
+        username: nacos
+        password: nacos
+        namespace: public
+        # 关闭新版强制校验，双重兜底，杜绝一切启动报错
+        import-check:
+          enabled: false
+
+# 打开自动配置报告，排查404时开启
+debug: true
+
+# 天气API配置
+weather:
+  api-url: https://wttr.in/%s?format=j1&lang=zh
