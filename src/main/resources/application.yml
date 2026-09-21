@@ -14,7 +14,7 @@ spring:
         version: 1.0.0
         protocol: STREAMABLE
         streamable-http:
-          mcp-endpoint: /mcp   # 唯一对外端点，POST/GET都走这个路径
+          mcp-endpoint: /mcp
           keep-alive-interval: 30s
         capabilities:
           tool: true
@@ -29,14 +29,12 @@ spring:
         username: nacos
         password: nacos
         namespace: public
-        # 【核心修复】关闭自动注册！！解决STARTING报错
-        register-enabled: false
+        register-enabled: false # 关闭自动注册
       config:
         server-addr: 127.0.0.1:8848
         username: nacos
         password: nacos
         namespace: public
-        # 关闭新版强制校验，双重兜底，杜绝一切启动报错
         import-check:
           enabled: false
 
@@ -46,3 +44,23 @@ debug: true
 # 天气API配置
 weather:
   api-url: https://wttr.in/%s?format=j1&lang=zh
+
+# RocketMQ Proxy
+rocketmq:
+  proxy-endpoint: 127.0.0.1:8081
+
+# Qdrant
+qdrant:
+  rest-url: http://127.0.0.1:6333
+  collection-name: doc_rag_collection
+  embedding-dimension: 1024
+
+dashscope:
+  api-key: sk-ws-H.ERYDLPY.L8gU.MEQCIGX03YaCpLs4ka5EvbyrFBBWxCrD5Niw9gZ2oxhvgkL9AiB6YolIS54wSPsbXYZ-_W55AXABpenBx0gqVj3SoFk8YA
+  embedding-model: text-embedding-v3
+  base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+
+embedding:
+  chunk:
+    size: 500
+    overlap: 100
