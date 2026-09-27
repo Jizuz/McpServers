@@ -2,6 +2,7 @@ package com.jizuz.mcpserver.mq.consumer;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jizuz.mcpserver.manager.LocalBm25Manager;
 import com.jizuz.mcpserver.manager.QdrantRestDocManager;
 import com.jizuz.mcpserver.models.mq.DocChunkVectorMsg;
 import lombok.extern.slf4j.Slf4j;
@@ -21,6 +22,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class DocVectorQdrantConsumer extends BaseConsumer<DocChunkVectorMsg>{
 
     private final QdrantRestDocManager qdrantRestDocManager;
+    private final LocalBm25Manager localBm25Manager;
 
     // 批量配置
     private static final int BATCH_SIZE = 20;
@@ -33,9 +35,11 @@ public class DocVectorQdrantConsumer extends BaseConsumer<DocChunkVectorMsg>{
     @Value("${rocketmq.proxy-endpoint}")
     private String proxyEndpoint;
 
-    public DocVectorQdrantConsumer(ObjectMapper objectMapper, QdrantRestDocManager qdrantRestDocManager) {
+    public DocVectorQdrantConsumer(ObjectMapper objectMapper, QdrantRestDocManager qdrantRestDocManager,
+                                   LocalBm25Manager localBm25Manager) {
         super(objectMapper);
         this.qdrantRestDocManager = qdrantRestDocManager;
+        this.localBm25Manager = localBm25Manager;
     }
 
     @PostConstruct
@@ -73,12 +77,15 @@ public class DocVectorQdrantConsumer extends BaseConsumer<DocChunkVectorMsg>{
         bufferQueue.drainTo(batchList);
         try {
             qdrantRestDocManager.batchUpsert(batchList);
+            // 写入成功后双写本地BM25索引，供多路召回
+            localBm25Manager.addChunks(batchList);
         } catch (Exception e) {
             log.error("批量写入Qdrant失败，消息数量:{}", batchList.size(), e);
             // 失败：逐个重试，失败的消息抛出异常，RocketMQ重试
             for(DocChunkVectorMsg msg : batchList){
                 try{
                     qdrantRestDocManager.upsertSingle(msg);
+                    localBm25Manager.addChunks(List.of(msg));
                 }catch (Exception ex){
                     log.error("单条写入失败 docId={}", msg.getDocId(), ex);
                     throw new RuntimeException("Qdrant写入异常", ex);

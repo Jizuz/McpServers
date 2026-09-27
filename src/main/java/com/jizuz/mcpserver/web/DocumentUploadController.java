@@ -1,6 +1,7 @@
 package com.jizuz.mcpserver.web;
 
 import com.jizuz.mcpserver.manager.DocumentParseManager;
+import com.jizuz.mcpserver.manager.LocalBm25Manager;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -16,6 +17,7 @@ import org.springframework.web.multipart.MultipartFile;
 public class DocumentUploadController {
 
     private final DocumentParseManager documentParseManager;
+    private final LocalBm25Manager localBm25Manager;
 
     @PostMapping("/upload")
     public String upload(@RequestParam("file") MultipartFile file) throws Exception {
@@ -28,6 +30,15 @@ public class DocumentUploadController {
     public String crawlWeb(@RequestParam String url) throws Exception {
         documentParseManager.parseWebPageAndSend(url);
         return "ok，网页开始抓取并向量化";
+    }
+
+    /**
+     * 手动重建本地BM25索引（Qdrant全量拉取）
+     */
+    @PostMapping("/rebuild-bm25")
+    public String rebuildBm25() {
+        int size = localBm25Manager.rebuildFromQdrant();
+        return "ok，BM25索引重建完成，当前片段数：" + size;
     }
 
 }

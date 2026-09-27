@@ -29,6 +29,9 @@ public class QdrantRestDocManager {
     @Value("${qdrant.embedding-dimension}")
     private int embeddingDimension;
 
+    /** scroll分页大小 */
+    private static final int SCROLL_PAGE_SIZE = 256;
+
     /**
      * 初始化集合，不存在则创建
      */
@@ -68,7 +71,8 @@ public class QdrantRestDocManager {
             payload.put("docType", msg.getDocType());
 
             Map<String, Object> point = new HashMap<>();
-            point.put("id", UUID.randomUUID().toString());
+            // point id固定使用chunkId，与本地BM25索引key对齐，供RRF多路召回融合定位同一片段
+            point.put("id", msg.getChunkId());
             point.put("vector", msg.getVector());
             point.put("payload", payload);
             points.add(point);
@@ -118,5 +122,36 @@ public class QdrantRestDocManager {
         requestBody.put("with_payload", true);
         Map<String,Object> resp = restTemplate.postForObject(url, requestBody, Map.class);
         return (List<Map<String, Object>>) resp.get("result");
+    }
+
+    /**
+     * scroll分页拉取集合内全部points（仅payload不含向量），供本地BM25索引全量构建/重建
+     */
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> scrollAllPoints() {
+        String url = qdrantRestUrl + "/collections/" + collectionName + "/points/scroll";
+        List<Map<String, Object>> allPoints = new ArrayList<>();
+        Object offset = null;
+        while (true) {
+            Map<String, Object> requestBody = new HashMap<>();
+            requestBody.put("limit", SCROLL_PAGE_SIZE);
+            requestBody.put("with_payload", true);
+            requestBody.put("with_vector", false);
+            if (offset != null) {
+                requestBody.put("offset", offset);
+            }
+            Map<String, Object> resp = restTemplate.postForObject(url, requestBody, Map.class);
+            Map<String, Object> result = (Map<String, Object>) resp.get("result");
+            List<Map<String, Object>> points = (List<Map<String, Object>>) result.get("points");
+            if (points != null && !points.isEmpty()) {
+                allPoints.addAll(points);
+            }
+            offset = result.get("next_page_offset");
+            if (offset == null) {
+                break;
+            }
+        }
+        log.info("Qdrant全量拉取完成，points数量:{}", allPoints.size());
+        return allPoints;
     }
 }

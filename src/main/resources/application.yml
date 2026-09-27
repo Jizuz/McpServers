@@ -64,3 +64,10 @@ embedding:
   chunk:
     size: 500
     overlap: 100
+
+# RAG多路召回（向量+BM25，RRF融合）
+rag:
+  recall:
+    vector-top-n: 10   # 向量召回条数
+    bm25-top-n: 10     # BM25关键词召回条数
+    rrf-k: 60          # RRF平滑常数（标准值60）
