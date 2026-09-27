@@ -56,7 +56,7 @@ qdrant:
   embedding-dimension: 1024
 
 dashscope:
-  api-key: sk-ws-H.ERYDLPY.L8gU.MEQCIGX03YaCpLs4ka5EvbyrFBBWxCrD5Niw9gZ2oxhvgkL9AiB6YolIS54wSPsbXYZ-_W55AXABpenBx0gqVj3SoFk8YA
+  api-key: 
   embedding-model: text-embedding-v3
   base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
 
