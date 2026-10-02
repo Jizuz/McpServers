@@ -1,11 +1,31 @@
 server:
   port: 8090
+  tomcat:
+    # /doc/add、/doc/update 粘贴长文本：form表单体上限（原默认2MB，中文百分号编码后膨胀约9倍）
+    max-http-form-post-size: 20MB
+    # 超限时继续读完请求体，避免连接被重置、客户端收到模糊报错
+    max-swallow-size: 100MB
 
 spring:
   application:
     name: mcp‑tool‑server
   config:
     import: optional:nacos
+  # 请求体大小限制：上传大文档入库（原默认：multipart单文件1MB、总请求10MB）
+  servlet:
+    multipart:
+      max-file-size: 50MB           # /doc/upload 单文件上限
+      max-request-size: 60MB        # multipart 整个请求上限
+  # 权威源MySQL（kb_doc表）：所有文档变更先落库、后判事件类型、再发MQ
+  datasource:
+    url: jdbc:mysql://127.0.0.1:3306/chatte?charset=utf8mb4
+    username: chatte
+    password: chatte
+    driver-class-name: com.mysql.cj.jdbc.Driver
+#  sql:
+#    init:
+#      mode: always          # 启动时自动执行schema.sql（CREATE TABLE IF NOT EXISTS，幂等）
+#      continue-on-error: false
   ai:
     mcp:
       server:
@@ -56,7 +76,7 @@ qdrant:
   embedding-dimension: 1024
 
 dashscope:
-  api-key: 
+  api-key: sk-ws-H.ERYDLPY.L8gU.MEQCIGX03YaCpLs4ka5EvbyrFBBWxCrD5Niw9gZ2oxhvgkL9AiB6YolIS54wSPsbXYZ-_W55AXABpenBx0gqVj3SoFk8YA
   embedding-model: text-embedding-v3
   base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
 
@@ -71,3 +91,7 @@ rag:
     vector-top-n: 10   # 向量召回条数
     bm25-top-n: 10     # BM25关键词召回条数
     rrf-k: 60          # RRF平滑常数（标准值60）
+  rebuild:
+    bm25-cron: 0 0 3 * * ?          # 每日凌晨3点：BM25从权威源全量重建
+    qdrant-cron: 0 30 4 * * SUN     # 每周日凌晨4:30：Qdrant全量重灌（清空后从权威源重写）
+    qdrant-enabled: false           # Qdrant周重建开关（依赖embedding可用，默认关闭）

@@ -2,6 +2,7 @@ package com.jizuz.mcpserver.tools;
 
 import com.jizuz.mcpserver.manager.LocalBm25Manager;
 import com.jizuz.mcpserver.manager.QdrantRestDocManager;
+import com.jizuz.mcpserver.models.enums.DocGroupEnum;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import lombok.extern.slf4j.Slf4j;
 import org.springaicommunity.mcp.annotation.McpTool;
@@ -46,13 +47,13 @@ public class RagTool {
     }
 
     /**
-     * MCP工具：健康科普知识库多路召回检索（向量 + 本地BM25关键词，RRF融合排序），仅服务健康科普助手场景
+     * MCP工具：健康科普知识库多路召回检索（向量 + 本地BM25关键词，RRF融合排序，支持六分组过滤），仅服务健康科普助手场景
      * readOnlyHint=true：只读查询，不会修改数据；
      * idempotentHint幂等，多次调用结果一致
      */
     @McpTool(
             name = "search_knowledge_base",
-            description = "健康科普知识库检索工具（向量+BM25关键词双路召回，RRF融合排序），仅用于健康科普助手场景。当用户咨询疾病、症状、用药、饮食养生、就医建议等健康科普问题时调用，从知识库检索权威科普片段作为回答依据。超出健康科普范围的问题不要调用本工具，也不要编造知识库中没有的医学内容。",
+            description = "健康科普知识库检索工具（向量+BM25关键词双路召回，RRF融合排序，支持按健康分组过滤），仅用于健康科普助手场景。当用户咨询疾病、症状、用药、饮食养生、就医建议等健康科普问题时调用，从知识库检索权威科普片段作为回答依据；若用户明确限定某类健康分组（如心血管、呼吸、儿童健康等）可通过docGroup过滤。超出健康科普范围的问题不要调用本工具，也不要编造知识库中没有的医学内容。",
             annotations = @McpTool.McpAnnotations(
                     readOnlyHint = true,
                     destructiveHint = false,
@@ -60,8 +61,9 @@ public class RagTool {
             )
     )
     public String searchKnowledgeBase(
-            @McpToolParam(description = "用户健康科普问题（如症状、疾病、饮食调理等），用于向量+关键词双路检索知识库", required = true) String query,
-            @McpToolParam(description = "返回TopK文档片段，默认3，最大5", required = false) Integer topK
+            @McpToolParam(description = "用户健康科普问题（如症状、疾病、饮食调理等），用于向量+关键词双路检索知识库") String query,
+            @McpToolParam(description = "返回TopK文档片段，默认3，最大5", required = false) Integer topK,
+            @McpToolParam(description = "文档分组过滤（可选，不传则检索全部分组）：cardio_health=心血管、resp_health=呼吸、ped_health=儿童健康、endo_health=内分泌、women_health=女性健康、common_living=通用居家健康", required = false) String docGroup
     ) {
         if (query == null || query.isBlank()) {
             return "检索失败：查询内容不能为空";
@@ -72,7 +74,11 @@ public class RagTool {
         if (topK > 5) {
             topK = 5;
         }
-        log.info("RagTool searchKnowledgeBase start, query: {}, topK: {}", query, topK);
+        String group = docGroup == null || docGroup.isBlank() ? null : docGroup.trim();
+        if (group != null && !DocGroupEnum.isValid(group)) {
+            return "检索失败：非法文档分组 " + group + "，可选：cardio_health/resp_health/ped_health/endo_health/women_health/common_living，或不传以检索全部";
+        }
+        log.info("RagTool searchKnowledgeBase start, query: {}, topK: {}, docGroup: {}", query, topK, group);
 
         // ===== 多路召回：任一路失败自动降级为另一路 =====
         List<Map<String, Object>> vectorHits = List.of();
@@ -83,7 +89,7 @@ public class RagTool {
         try {
             // 路1：DashScope向量化 + Qdrant向量检索
             float[] vector = embeddingModel.embed(query).content().vector();
-            List<Map<String, Object>> hits = qdrantRestDocManager.search(toFloatList(vector), vectorTopN);
+            List<Map<String, Object>> hits = qdrantRestDocManager.search(toFloatList(vector), vectorTopN, group);
             vectorHits = hits == null ? List.of() : hits;
         } catch (Exception e) {
             vectorOk = false;
@@ -92,7 +98,7 @@ public class RagTool {
 
         try {
             // 路2：本地BM25关键词检索
-            List<LocalBm25Manager.Bm25Hit> hits = localBm25Manager.search(query, bm25TopN);
+            List<LocalBm25Manager.Bm25Hit> hits = localBm25Manager.search(query, bm25TopN, group);
             bm25Hits = hits == null ? List.of() : hits;
         } catch (Exception e) {
             bm25Ok = false;
@@ -104,7 +110,7 @@ public class RagTool {
         }
         if (vectorHits.isEmpty() && bm25Hits.isEmpty()) {
             log.info("RagTool searchKnowledgeBase empty result, query: {}", query);
-            return "知识库中未检索到相关内容，请尝试换个问法，或先通过 /rag/doc/upload 上传相关文档";
+            return "知识库中未检索到相关内容，请尝试换个问法，或先通过 /rag/admin/doc/upload 上传相关文档";
         }
 
         // ===== RRF融合：score(d) = Σ 1/(k + rank_i(d))，双路均命中者排前 =====
@@ -112,7 +118,8 @@ public class RagTool {
 
         // ===== 拼接上下文返回给大模型 =====
         StringBuilder context = new StringBuilder();
-        context.append("====知识库多路召回结果（向量+BM25，RRF融合 k=").append(rrfK).append("）====\n");
+        context.append("====知识库多路召回结果（向量+BM25，RRF融合 k=").append(rrfK)
+                .append("，分组:").append(group == null ? "全部" : group).append("）====\n");
         if (!vectorOk) {
             context.append("（提示：向量召回暂不可用，本次仅BM25关键词召回）\n");
         }
@@ -124,6 +131,7 @@ public class RagTool {
                     .append(" 向量:").append(hit.vectorScore() == null ? "-" : String.format("%.4f", hit.vectorScore()))
                     .append(" BM25:").append(hit.bm25Score() == null ? "-" : String.format("%.4f", hit.bm25Score()))
                     .append(" 命中:").append(hit.hitFrom())
+                    .append(" 分组:").append(hit.docGroup() == null || hit.docGroup().isEmpty() ? "-" : hit.docGroup())
                     .append(" 来源:").append(hit.fileName())
                     .append("】\n")
                     .append(hit.content()).append("\n\n");
@@ -149,7 +157,9 @@ public class RagTool {
             if (!b.metaFilled) {
                 Map<String, Object> payload = getPayload(point);
                 b.content = String.valueOf(payload.getOrDefault("content", ""));
-                b.fileName = String.valueOf(payload.getOrDefault("fileName", "未知来源"));
+                b.fileName = String.valueOf(payload.getOrDefault("fileName",
+                        payload.getOrDefault("title", "未知来源")));
+                b.docGroup = payload.get("docGroup") == null ? "" : String.valueOf(payload.get("docGroup"));
                 b.metaFilled = true;
             }
             b.vectorScore = toDouble(point.get("score"));
@@ -164,6 +174,7 @@ public class RagTool {
             if (!b.metaFilled) {
                 b.content = hit.content();
                 b.fileName = hit.fileName();
+                b.docGroup = hit.docGroup() == null ? "" : hit.docGroup();
                 b.metaFilled = true;
             }
             b.bm25Score = hit.score();
@@ -200,7 +211,7 @@ public class RagTool {
      * 融合后条目
      */
     private record FusedHit(String pointId, double rrfScore, Double vectorScore, Double bm25Score,
-                            String content, String fileName, String hitFrom) {}
+                            String content, String fileName, String docGroup, String hitFrom) {}
 
     /**
      * 融合构造器（可变累积）
@@ -211,13 +222,14 @@ public class RagTool {
         Double bm25Score;
         String content = "";
         String fileName = "";
+        String docGroup = "";
         boolean metaFilled;
         boolean fromVector;
         boolean fromBm25;
 
         FusedHit build(String pointId) {
             String hitFrom = fromVector && fromBm25 ? "向量+关键词" : (fromVector ? "向量" : "关键词");
-            return new FusedHit(pointId, rrfScore, vectorScore, bm25Score, content, fileName, hitFrom);
+            return new FusedHit(pointId, rrfScore, vectorScore, bm25Score, content, fileName, docGroup, hitFrom);
         }
     }
 

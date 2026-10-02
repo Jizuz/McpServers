@@ -93,6 +93,20 @@ public class QdrantRestDocManager {
     }
 
     /**
+     * 通用批量写入（权威源事件链路：payload含docId/docGroup/title，point id=docId_分块序号）
+     */
+    public void upsertRawPoints(List<Map<String, Object>> points) {
+        if (points == null || points.isEmpty()) {
+            return;
+        }
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("points", points);
+        String url = qdrantRestUrl + "/collections/" + collectionName + "/points";
+        restTemplate.put(url, requestBody);
+        log.info("批量写入Qdrant成功，数量:{}", points.size());
+    }
+
+    /**
      * 根据docId 删除该文档下所有向量（文档更新/删除场景）
      */
     public void deleteByDocId(String docId) {
@@ -109,19 +123,32 @@ public class QdrantRestDocManager {
     }
 
     /**
-     * 向量检索，RAG查询阶段使用
-     * @param vector 查询向量
-     * @param topN 返回条数
-     * @return 匹配的chunk列表
+     * 向量检索，RAG查询阶段使用（全库）
      */
     public List<Map<String, Object>> search(List<Float> vector, int topN) {
+        return search(vector, topN, null);
+    }
+
+    /**
+     * 向量检索（可按doc_group前置过滤：filtered HNSW先缩小候选集再图遍历，跨分组不串扰）
+     * @param docGroup 分组代码，null则全库检索
+     */
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> search(List<Float> vector, int topN, String docGroup) {
         String url = qdrantRestUrl + "/collections/" + collectionName + "/points/search";
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("vector", vector);
         requestBody.put("limit", topN);
         requestBody.put("with_payload", true);
-        Map<String,Object> resp = restTemplate.postForObject(url, requestBody, Map.class);
-        return (List<Map<String, Object>>) resp.get("result");
+        if (docGroup != null && !docGroup.isBlank()) {
+            requestBody.put("filter", Map.of(
+                    "must", List.of(Map.of(
+                            "key", "docGroup",
+                            "match", Map.of("value", docGroup)))
+            ));
+        }
+        Map<String, Object> resp = restTemplate.postForObject(url, requestBody, Map.class);
+        return resp == null ? List.of() : (List<Map<String, Object>>) resp.get("result");
     }
 
     /**
@@ -153,5 +180,22 @@ public class QdrantRestDocManager {
         }
         log.info("Qdrant全量拉取完成，points数量:{}", allPoints.size());
         return allPoints;
+    }
+
+    /**
+     * 清空集合全部points（每周全量重灌前调用：scroll取全部id后按id删除）
+     */
+    public void deleteAllPoints() {
+        List<Map<String, Object>> points = scrollAllPoints();
+        if (points.isEmpty()) {
+            return;
+        }
+        List<Object> ids = new ArrayList<>(points.size());
+        for (Map<String, Object> point : points) {
+            ids.add(point.get("id"));
+        }
+        String url = qdrantRestUrl + "/collections/" + collectionName + "/points/delete";
+        restTemplate.postForObject(url, Map.of("points", ids), String.class);
+        log.info("清空Qdrant集合完成，删除points数量:{}", ids.size());
     }
 }

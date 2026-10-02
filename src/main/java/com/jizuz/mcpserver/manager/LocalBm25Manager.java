@@ -1,5 +1,7 @@
 package com.jizuz.mcpserver.manager;
 
+import com.jizuz.mcpserver.dao.KbDocDao;
+import com.jizuz.mcpserver.dao.Entity.KbDoc;
 import com.jizuz.mcpserver.models.mq.DocChunkVectorMsg;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -9,6 +11,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +36,8 @@ public class LocalBm25Manager {
 
     private final QdrantRestDocManager qdrantRestDocManager;
 
+    private final KbDocDao kbDocDao;
+
     /** pointId -> 索引文档 */
     private final Map<String, Bm25Doc> docMap = new HashMap<>();
 
@@ -45,18 +50,49 @@ public class LocalBm25Manager {
     /**
      * BM25检索单条结果
      */
-    public record Bm25Hit(String pointId, double score, String content, String fileName, String docType) {}
+    public record Bm25Hit(String pointId, String docId, String docGroup, double score,
+                          String content, String fileName, String docType) {}
 
     /**
-     * 启动时全量构建索引（Qdrant不可用时仅告警，不阻断启动，可稍后通过 /rag/doc/rebuild-bm25 重建）
+     * 启动时全量构建索引（Qdrant不可用时仅告警，不阻断启动，可稍后通过 /rag/admin/doc/rebuild-bm25 重建）
      */
     @EventListener(ApplicationReadyEvent.class)
     public void init() {
         try {
-            log.info("BM25索引初始化完成，片段数:{}", rebuildFromQdrant());
+            int size = rebuildFromDb();
+            if (size == 0) {
+                // 权威源为空（新库上线）：回退拉取Qdrant存量数据，保证旧文档仍可关键词检索
+                log.info("权威源无有效文档，回退从Qdrant构建BM25索引，片段数:{}", rebuildFromQdrant());
+            } else {
+                log.info("BM25索引初始化完成（权威源），片段数:{}", size);
+            }
         } catch (Exception e) {
-            log.warn("BM25索引初始化失败（Qdrant不可用），可通过 POST /rag/doc/rebuild-bm25 手动重建：{}", e.getMessage());
+            log.warn("BM25索引初始化失败（权威源/Qdrant不可用），可通过 POST /rag/admin/doc/rebuild-bm25 手动重建：{}", e.getMessage());
         }
+    }
+
+    /**
+     * 从权威源全量重建索引（每日定时任务/手动触发；锁内清空重灌并重算全局IDF，等价原子替换零停机）
+     * @return 索引片段数
+     */
+    public synchronized int rebuildFromDb() {
+        List<KbDoc> chunks = kbDocDao.listValidChunks();
+        docMap.clear();
+        postings.clear();
+        avgDocLen = 1.0;
+        Map<String, List<KbDoc>> byDoc = new LinkedHashMap<>();
+        for (KbDoc chunk : chunks) {
+            byDoc.computeIfAbsent(chunk.getDocId(), k -> new ArrayList<>()).add(chunk);
+        }
+        for (List<KbDoc> docChunks : byDoc.values()) {
+            for (KbDoc chunk : docChunks) {
+                index(chunk.getDocId() + "_" + chunk.getChunkId(),
+                        chunk.getDocId(), chunk.getDocGroup(),
+                        chunk.getContent(), chunk.getTitle(), "kb");
+            }
+        }
+        log.info("BM25索引重建完成（权威源），片段数:{}", docMap.size());
+        return docMap.size();
     }
 
     /**
@@ -72,6 +108,7 @@ public class LocalBm25Manager {
             Map<String, Object> payload = payloadOf(point);
             index(String.valueOf(point.get("id")),
                     str(payload.get("docId")),
+                    payload.get("docGroup") == null ? null : str(payload.get("docGroup")),
                     str(payload.get("content")),
                     str(payload.get("fileName")),
                     str(payload.get("docType")));
@@ -81,14 +118,26 @@ public class LocalBm25Manager {
     }
 
     /**
-     * MQ消费写入Qdrant成功后，增量写入本地BM25索引（chunkId即Qdrant point id）
+     * 权威源事件链路：按docId整篇分块增量写入（pointId = docId_分块序号，与kb_doc行/Qdrant point三方对齐）
+     */
+    public synchronized void addDocChunks(String docId, String docGroup, String title, List<String> chunks) {
+        if (docId == null || chunks == null || chunks.isEmpty()) {
+            return;
+        }
+        for (int i = 0; i < chunks.size(); i++) {
+            index(docId + "_" + i, docId, docGroup, chunks.get(i), title, "kb");
+        }
+    }
+
+    /**
+     * 旧链路（vector_write）：MQ消费写入Qdrant成功后，增量写入本地BM25索引（chunkId即Qdrant point id，无分组）
      */
     public synchronized void addChunks(List<DocChunkVectorMsg> msgList) {
         if (msgList == null || msgList.isEmpty()) {
             return;
         }
         for (DocChunkVectorMsg msg : msgList) {
-            index(msg.getChunkId(), msg.getDocId(), msg.getContent(), msg.getFileName(), msg.getDocType());
+            index(msg.getChunkId(), msg.getDocId(), null, msg.getContent(), msg.getFileName(), msg.getDocType());
         }
     }
 
@@ -106,13 +155,22 @@ public class LocalBm25Manager {
     }
 
     /**
-     * BM25关键词检索，返回按得分降序的TopN
+     * BM25关键词检索，返回按得分降序的TopN（全库）
      */
     public synchronized List<Bm25Hit> search(String query, int topN) {
+        return search(query, topN, null);
+    }
+
+    /**
+     * BM25关键词检索（可按doc_group过滤命中片段，保证分组维度检索不跨分组串扰；IDF仍按全库计算）
+     * @param docGroup 分组代码，null则全库检索
+     */
+    public synchronized List<Bm25Hit> search(String query, int topN, String docGroup) {
         List<String> qTerms = tokenize(query);
         if (qTerms.isEmpty() || docMap.isEmpty()) {
             return List.of();
         }
+        boolean filterGroup = docGroup != null && !docGroup.isBlank();
         int n = docMap.size();
         Map<String, Double> scores = new HashMap<>();
         for (String term : qTerms) {
@@ -124,6 +182,12 @@ public class LocalBm25Manager {
             double idf = Math.log(1.0 + (n - df + 0.5) / (df + 0.5));
             for (String pointId : hitIds) {
                 Bm25Doc doc = docMap.get(pointId);
+                if (doc == null) {
+                    continue;
+                }
+                if (filterGroup && !docGroup.equals(doc.docGroup())) {
+                    continue;
+                }
                 Integer freq = doc.tf().get(term);
                 if (freq == null) {
                     continue;
@@ -138,7 +202,8 @@ public class LocalBm25Manager {
                 .limit(topN)
                 .map(e -> {
                     Bm25Doc doc = docMap.get(e.getKey());
-                    return new Bm25Hit(doc.pointId(), e.getValue(), doc.content(), doc.fileName(), doc.docType());
+                    return new Bm25Hit(doc.pointId(), doc.docId(), doc.docGroup(), e.getValue(),
+                            doc.content(), doc.fileName(), doc.docType());
                 })
                 .toList();
     }
@@ -152,7 +217,7 @@ public class LocalBm25Manager {
 
     // ========== 内部：索引维护 ==========
 
-    private void index(String pointId, String docId, String content, String fileName, String docType) {
+    private void index(String pointId, String docId, String docGroup, String content, String fileName, String docType) {
         if (pointId == null || pointId.isBlank() || content == null || content.isBlank()) {
             return;
         }
@@ -162,7 +227,7 @@ public class LocalBm25Manager {
         for (String term : terms) {
             tf.merge(term, 1, Integer::sum);
         }
-        docMap.put(pointId, new Bm25Doc(pointId, docId, content, fileName, docType, tf, terms.size()));
+        docMap.put(pointId, new Bm25Doc(pointId, docId, docGroup, content, fileName, docType, tf, terms.size()));
         for (String term : tf.keySet()) {
             postings.computeIfAbsent(term, k -> new HashSet<>()).add(pointId);
         }
@@ -244,7 +309,7 @@ public class LocalBm25Manager {
     /**
      * 索引文档（不可变）
      */
-    private record Bm25Doc(String pointId, String docId, String content, String fileName, String docType,
+    private record Bm25Doc(String pointId, String docId, String docGroup, String content, String fileName, String docType,
                            Map<String, Integer> tf, int len) {}
 
 }
